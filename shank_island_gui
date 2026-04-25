@@ -7,10 +7,12 @@ import json
 import os
 
 # ── Data files ───────────────────────────────────────────────────────────────
-USERS_FILE   = "users.json"
-ROUNDS_FILE  = "rounds.json"
-FRIENDS_FILE = "friends.json"   # {user: [friend, ...]}
-REQUESTS_FILE = "requests.json" # {recipient: [sender, ...]}
+USERS_FILE    = "users.json"
+ROUNDS_FILE   = "rounds.json"
+FRIENDS_FILE  = "friends.json"    # {user: [friend,...]}
+REQUESTS_FILE = "requests.json"   # {recipient: [sender,...]}
+COMMENTS_FILE = "comments.json"   # {owner: {round_index: [{author,text}]}}
+NOTIFS_FILE   = "notifs.json"     # {user: [{type,from,text,read}]}
 
 def load_json(path):
     if os.path.exists(path):
@@ -23,9 +25,9 @@ def save_json(path, data):
         json.dump(data, f, indent=2)
 
 def format_diff(diff):
-    if diff == 0:   return "E (Even)"
-    elif diff > 0:  return f"+{diff} (over par)"
-    else:           return f"{diff} (under par)"
+    if diff == 0:  return "E (Even)"
+    elif diff > 0: return f"+{diff} (over par)"
+    else:          return f"{diff} (under par)"
 
 def calc_handicap(rounds):
     diffs = []
@@ -36,20 +38,36 @@ def calc_handicap(rounds):
             pass
     return sum(diffs) / len(diffs) if diffs else None
 
+def get_best_worst(rounds):
+    """Return (best_index, worst_index) by score-par diff. None if <1 valid round."""
+    scored = []
+    for i, r in enumerate(rounds):
+        try:
+            scored.append((i, int(r["score"]) - int(r["par"])))
+        except (KeyError, ValueError):
+            pass
+    if not scored:
+        return None, None
+    best  = min(scored, key=lambda x: x[1])[0]
+    worst = max(scored, key=lambda x: x[1])[0]
+    return best, worst
+
 # ── App ───────────────────────────────────────────────────────────────────────
 class ShankIslandApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Shank Island")
-        self.geometry("500x480")
+        self.geometry("500x500")
         self.resizable(False, False)
         self.configure(bg="#1a5c2a")
 
         self.current_user = None
         self.users    = load_json(USERS_FILE)
         self.rounds   = load_json(ROUNDS_FILE)
-        self.friends  = load_json(FRIENDS_FILE)   # {user: [friend,...]}
-        self.requests = load_json(REQUESTS_FILE)  # {recipient: [sender,...]}
+        self.friends  = load_json(FRIENDS_FILE)
+        self.requests = load_json(REQUESTS_FILE)
+        self.comments = load_json(COMMENTS_FILE)
+        self.notifs   = load_json(NOTIFS_FILE)
 
         self.frame = None
         self.show_home()
@@ -83,14 +101,51 @@ class ShankIslandApp(tk.Tk):
     def get_requests(self, user):
         return self.requests.get(user, [])
 
-    def pending_requests_count(self):
-        return len(self.get_requests(self.current_user))
+    def add_notif(self, recipient, notif_type, from_user, text):
+        """Push a notification to a user."""
+        self.notifs.setdefault(recipient, [])
+        self.notifs[recipient].append({
+            "type": notif_type, "from": from_user,
+            "text": text, "read": False
+        })
+        save_json(NOTIFS_FILE, self.notifs)
+
+    def unread_notif_count(self):
+        return sum(1 for n in self.notifs.get(self.current_user, []) if not n["read"])
+
+    def get_round_comments(self, owner, round_idx):
+        return self.comments.get(owner, {}).get(str(round_idx), [])
+
+    def add_comment(self, owner, round_idx, author, text):
+        self.comments.setdefault(owner, {})
+        key = str(round_idx)
+        self.comments[owner].setdefault(key, [])
+        self.comments[owner][key].append({"author": author, "text": text})
+        save_json(COMMENTS_FILE, self.comments)
+
+    # ── top bar helper ────────────────────────────────────────────────────────
+    def _make_top_bar(self):
+        top_bar = tk.Frame(self.frame, bg="#1a5c2a")
+        top_bar.pack(fill="x", padx=8, pady=(6, 0))
+
+        # Friends icon
+        tk.Button(top_bar, text="👤", command=self.show_friends_list,
+                  font=("Georgia", 14), bg="#1a5c2a", fg="#f0e68c",
+                  relief="flat", cursor="hand2", bd=0).pack(side="right", padx=(4, 0))
+
+        # Envelope icon with unread badge
+        unread = self.unread_notif_count()
+        env_text = f"✉ {unread}" if unread else "✉"
+        env_color = "#e67e22" if unread else "#f0e68c"
+        tk.Button(top_bar, text=env_text, command=self.show_notifications,
+                  font=("Georgia", 13), bg="#1a5c2a", fg=env_color,
+                  relief="flat", cursor="hand2", bd=0).pack(side="right", padx=(4, 0))
 
     # ── pages ─────────────────────────────────────────────────────────────────
 
     # HOME
     def show_home(self):
-        self.geometry("500x480")
+        self.geometry("500x500")
         self.clear()
         self.current_user = None
         self.label(self.frame, "⛳  SHANK ISLAND  ⛳", size=26, bold=True, pady=60)
@@ -98,7 +153,7 @@ class ShankIslandApp(tk.Tk):
 
     # LOGIN
     def show_login(self):
-        self.geometry("500x480")
+        self.geometry("500x500")
         self.clear()
         self.label(self.frame, "Login", size=20, bold=True, pady=20)
         self.label(self.frame, "Username:", size=11)
@@ -123,7 +178,7 @@ class ShankIslandApp(tk.Tk):
 
         self.button(self.frame, "Login", attempt_login)
 
-    # NEW USER PROMPT
+    # NEW USER
     def show_new_user_prompt(self, username, password):
         self.clear()
         self.label(self.frame, "Username not found.", size=13, pady=30)
@@ -140,24 +195,52 @@ class ShankIslandApp(tk.Tk):
 
     # MAIN MENU
     def show_menu(self):
-        self.geometry("500x480")
+        self.geometry("500x500")
         self.clear()
-
-        # ── Friends icon (top-right corner) ──────────────────────────────────
-        top_bar = tk.Frame(self.frame, bg="#1a5c2a")
-        top_bar.pack(fill="x", padx=8, pady=(6, 0))
-        tk.Button(top_bar, text="👤", command=self.show_friends_list,
-                  font=("Georgia", 14), bg="#1a5c2a", fg="#f0e68c",
-                  relief="flat", cursor="hand2", bd=0).pack(side="right")
-
-        self.label(self.frame, f"Welcome, {self.current_user}!", size=16, bold=True, pady=10)
+        self._make_top_bar()
+        self.label(self.frame, f"Welcome, {self.current_user}!", size=16, bold=True, pady=8)
         self.button(self.frame, "Record Round",          self.show_record_round)
         self.button(self.frame, "Load Previous Rounds",  self.show_previous_rounds)
         self.button(self.frame, "View Friends Activity", self.show_friends_activity)
         self.button(self.frame, "Add Friends",           self.show_add_friends)
         self.button(self.frame, "Go Back (Logout)",      self.show_login)
 
-    # ── FRIENDS LIST (popup overlay) ─────────────────────────────────────────
+    # ── NOTIFICATIONS ─────────────────────────────────────────────────────────
+    def show_notifications(self):
+        self.geometry("500x500")
+        self.clear()
+        self.label(self.frame, "✉  Notifications", size=18, bold=True, pady=10)
+
+        user_notifs = self.notifs.get(self.current_user, [])
+
+        # Mark all as read
+        for n in user_notifs:
+            n["read"] = True
+        save_json(NOTIFS_FILE, self.notifs)
+
+        if not user_notifs:
+            self.label(self.frame, "No notifications yet.", size=12, color="#f0e68c")
+        else:
+            text_box = tk.Text(self.frame, font=("Courier", 10), width=52, height=14,
+                               bg="#0f3d1a", fg="white", relief="flat", padx=8, pady=6)
+            text_box.pack(pady=6)
+            for n in reversed(user_notifs):
+                icon = "🤝" if n["type"] == "friend_request" else "💬"
+                text_box.insert("end", f"{icon}  {n['text']}\n\n")
+            text_box.config(state="disabled")
+
+            def clear_all():
+                self.notifs[self.current_user] = []
+                save_json(NOTIFS_FILE, self.notifs)
+                self.show_notifications()
+
+            tk.Button(self.frame, text="Clear All", command=clear_all,
+                      font=("Georgia", 11), width=14, bg="#c0392b", fg="white",
+                      relief="raised", cursor="hand2").pack(pady=4)
+
+        self.button(self.frame, "Back", self.show_menu)
+
+    # ── FRIENDS LIST popup ────────────────────────────────────────────────────
     def show_friends_list(self):
         friends = self.get_friends(self.current_user)
         win = tk.Toplevel(self)
@@ -173,15 +256,13 @@ class ShankIslandApp(tk.Tk):
             tk.Label(win, text="No friends yet.", font=("Georgia", 12),
                      bg="#1a5c2a", fg="#f0e68c").pack(pady=10)
         else:
-            list_frame = tk.Frame(win, bg="#1a5c2a")
-            list_frame.pack(padx=14, pady=4, fill="both", expand=True)
-            sb = tk.Scrollbar(list_frame)
-            sb.pack(side="right", fill="y")
-            lb = tk.Listbox(list_frame, font=("Courier", 12), bg="#0f3d1a", fg="white",
+            lf = tk.Frame(win, bg="#1a5c2a")
+            lf.pack(padx=14, pady=4, fill="both", expand=True)
+            sb = tk.Scrollbar(lf); sb.pack(side="right", fill="y")
+            lb = tk.Listbox(lf, font=("Courier", 12), bg="#0f3d1a", fg="white",
                             selectbackground="#f0e68c", selectforeground="#1a5c2a",
                             relief="flat", yscrollcommand=sb.set)
-            sb.config(command=lb.yview)
-            lb.pack(fill="both", expand=True)
+            sb.config(command=lb.yview); lb.pack(fill="both", expand=True)
             for f in friends:
                 lb.insert("end", f"  {f}")
 
@@ -191,16 +272,12 @@ class ShankIslandApp(tk.Tk):
                     messagebox.showwarning("No selection", "Select a friend to remove.", parent=win)
                     return
                 fname = friends[sel[0]]
-                if not messagebox.askyesno("Remove Friend",
-                        f"Remove {fname} as a friend?", parent=win):
+                if not messagebox.askyesno("Remove Friend", f"Remove {fname} as a friend?", parent=win):
                     return
-                # remove both directions
-                self.friends.setdefault(self.current_user, [])
-                self.friends.setdefault(fname, [])
-                if fname in self.friends[self.current_user]:
-                    self.friends[self.current_user].remove(fname)
-                if self.current_user in self.friends[fname]:
-                    self.friends[fname].remove(self.current_user)
+                for a, b in [(self.current_user, fname), (fname, self.current_user)]:
+                    self.friends.setdefault(a, [])
+                    if b in self.friends[a]:
+                        self.friends[a].remove(b)
                 save_json(FRIENDS_FILE, self.friends)
                 win.destroy()
                 self.show_friends_list()
@@ -213,18 +290,17 @@ class ShankIslandApp(tk.Tk):
                   font=("Georgia", 11), bg="#f0e68c", fg="#1a5c2a",
                   relief="raised", cursor="hand2").pack(pady=4)
 
-    # ── ADD FRIENDS PAGE ─────────────────────────────────────────────────────
+    # ── ADD FRIENDS ───────────────────────────────────────────────────────────
     def show_add_friends(self):
-        self.geometry("500x480")
+        self.geometry("500x500")
         self.clear()
         self.label(self.frame, "Add Friends", size=18, bold=True, pady=10)
 
-        # pending incoming badge
-        pending = self.pending_requests_count()
+        pending = len(self.get_requests(self.current_user))
         badge = f"  View Requests ({pending} pending)" if pending else "  View Requests"
         tk.Button(self.frame, text=badge, command=self.show_view_requests,
                   font=("Georgia", 11), width=26,
-                  bg="#2e8b57" if not pending else "#e67e22",
+                  bg="#e67e22" if pending else "#2e8b57",
                   fg="white", relief="raised", cursor="hand2").pack(pady=4)
 
         self.label(self.frame, "Enter a username to send a friend request:", size=11, pady=6)
@@ -233,36 +309,31 @@ class ShankIslandApp(tk.Tk):
         def send_request():
             target = req_entry.get().strip()
             if not target:
-                messagebox.showwarning("Empty", "Please enter a username.")
-                return
+                messagebox.showwarning("Empty", "Please enter a username."); return
             if target == self.current_user:
-                messagebox.showwarning("Oops", "You can't add yourself!")
-                return
+                messagebox.showwarning("Oops", "You can't add yourself!"); return
             if target not in self.users:
-                messagebox.showerror("Not found", f'No account found for "{target}".')
-                return
+                messagebox.showerror("Not found", f'No account found for "{target}".'); return
             if target in self.get_friends(self.current_user):
-                messagebox.showinfo("Already friends", f"You and {target} are already friends!")
-                return
-            pending_out = self.requests.get(target, [])
-            if self.current_user in pending_out:
-                messagebox.showinfo("Already sent", f"You already sent {target} a request!")
-                return
+                messagebox.showinfo("Already friends", f"You and {target} are already friends!"); return
+            if self.current_user in self.requests.get(target, []):
+                messagebox.showinfo("Already sent", f"You already sent {target} a request!"); return
             self.requests.setdefault(target, [])
             self.requests[target].append(self.current_user)
             save_json(REQUESTS_FILE, self.requests)
+            self.add_notif(target, "friend_request", self.current_user,
+                           f"{self.current_user} sent you a friend request.")
             messagebox.showinfo("Sent!", f"Friend request sent to {target}.")
             req_entry.delete(0, "end")
 
         self.button(self.frame, "Send Request", send_request, width=18)
         self.button(self.frame, "Back", self.show_menu)
 
-    # ── VIEW REQUESTS PAGE ───────────────────────────────────────────────────
+    # ── VIEW REQUESTS ─────────────────────────────────────────────────────────
     def show_view_requests(self):
-        self.geometry("500x480")
+        self.geometry("500x500")
         self.clear()
         self.label(self.frame, "Friend Requests", size=18, bold=True, pady=10)
-
         incoming = self.get_requests(self.current_user)
 
         if not incoming:
@@ -271,131 +342,53 @@ class ShankIslandApp(tk.Tk):
             return
 
         self.label(self.frame, "Select a request below:", size=11)
-
-        list_frame = tk.Frame(self.frame, bg="#1a5c2a")
-        list_frame.pack(pady=4)
-        sb = tk.Scrollbar(list_frame)
-        sb.pack(side="right", fill="y")
-        lb = tk.Listbox(list_frame, font=("Courier", 12), width=36, height=6,
+        lf = tk.Frame(self.frame, bg="#1a5c2a"); lf.pack(pady=4)
+        sb = tk.Scrollbar(lf); sb.pack(side="right", fill="y")
+        lb = tk.Listbox(lf, font=("Courier", 12), width=36, height=6,
                         bg="#0f3d1a", fg="white",
                         selectbackground="#f0e68c", selectforeground="#1a5c2a",
                         relief="flat", yscrollcommand=sb.set)
-        sb.config(command=lb.yview)
-        lb.pack(side="left")
-        for sender in incoming:
-            lb.insert("end", f"  {sender}")
+        sb.config(command=lb.yview); lb.pack(side="left")
+        for s in incoming:
+            lb.insert("end", f"  {s}")
 
-        btn_frame = tk.Frame(self.frame, bg="#1a5c2a")
-        btn_frame.pack(pady=8)
+        bf = tk.Frame(self.frame, bg="#1a5c2a"); bf.pack(pady=8)
 
         def accept():
             sel = lb.curselection()
             if not sel:
-                messagebox.showwarning("No selection", "Select a request first.")
-                return
+                messagebox.showwarning("No selection", "Select a request first."); return
             sender = incoming[sel[0]]
-            # add friendship both ways
-            self.friends.setdefault(self.current_user, [])
-            self.friends.setdefault(sender, [])
-            if sender not in self.friends[self.current_user]:
-                self.friends[self.current_user].append(sender)
-            if self.current_user not in self.friends[sender]:
-                self.friends[sender].append(self.current_user)
-            # remove request
+            for a, b in [(self.current_user, sender), (sender, self.current_user)]:
+                self.friends.setdefault(a, [])
+                if b not in self.friends[a]:
+                    self.friends[a].append(b)
             self.requests[self.current_user].remove(sender)
             save_json(FRIENDS_FILE, self.friends)
             save_json(REQUESTS_FILE, self.requests)
+            self.add_notif(sender, "friend_accept", self.current_user,
+                           f"{self.current_user} accepted your friend request!")
             messagebox.showinfo("Friends!", f"You and {sender} are now friends!")
             self.show_view_requests()
 
         def deny():
             sel = lb.curselection()
             if not sel:
-                messagebox.showwarning("No selection", "Select a request first.")
-                return
+                messagebox.showwarning("No selection", "Select a request first."); return
             sender = incoming[sel[0]]
             self.requests[self.current_user].remove(sender)
             save_json(REQUESTS_FILE, self.requests)
             self.show_view_requests()
 
-        tk.Button(btn_frame, text="Accept", command=accept,
-                  font=("Georgia", 12), width=10,
+        tk.Button(bf, text="Accept", command=accept, font=("Georgia", 12), width=10,
                   bg="#2e8b57", fg="white", relief="raised", cursor="hand2").pack(side="left", padx=8)
-        tk.Button(btn_frame, text="Deny", command=deny,
-                  font=("Georgia", 12), width=10,
+        tk.Button(bf, text="Deny", command=deny, font=("Georgia", 12), width=10,
                   bg="#c0392b", fg="white", relief="raised", cursor="hand2").pack(side="left", padx=8)
-
         self.button(self.frame, "Back", self.show_add_friends)
-
-    # ── FRIENDS ACTIVITY ─────────────────────────────────────────────────────
-    def show_friends_activity(self):
-        self.geometry("500x520")
-        self.clear()
-        self.label(self.frame, "Friends Activity", size=18, bold=True, pady=8)
-
-        friends = self.get_friends(self.current_user)
-        if not friends:
-            self.label(self.frame, "You have no friends yet.", size=12, color="#f0e68c")
-            self.label(self.frame, "Add friends to see their rounds here.", size=11)
-            self.button(self.frame, "Back", self._back_from_activity)
-            return
-
-        # Friend selector
-        self.label(self.frame, "Select a friend:", size=11, pady=2)
-        sel_frame = tk.Frame(self.frame, bg="#1a5c2a")
-        sel_frame.pack()
-        friend_var = tk.StringVar(value=friends[0])
-        for f in friends:
-            tk.Radiobutton(sel_frame, text=f, variable=friend_var, value=f,
-                           font=("Georgia", 11), bg="#1a5c2a", fg="white",
-                           selectcolor="#0f3d1a", activebackground="#1a5c2a",
-                           cursor="hand2").pack(side="left", padx=6)
-
-        # Rounds display
-        text_box = tk.Text(self.frame, font=("Courier", 10), width=52, height=10,
-                           bg="#0f3d1a", fg="white", relief="flat", padx=8, pady=6)
-        text_box.pack(pady=6)
-
-        def load_friend_rounds():
-            fname = friend_var.get()
-            f_rounds = self.rounds.get(fname, [])
-            text_box.config(state="normal")
-            text_box.delete("1.0", "end")
-            if not f_rounds:
-                text_box.insert("end", f"  {fname} has no recorded rounds yet.\n")
-            else:
-                for i, r in enumerate(f_rounds, 1):
-                    try:
-                        diff = int(r["score"]) - int(r["par"])
-                        diff_str = format_diff(diff)
-                    except (KeyError, ValueError):
-                        diff_str = "N/A"
-                    text_box.insert("end",
-                        f"Round {i}:\n"
-                        f"  Course : {r['course']}\n"
-                        f"  Score  : {r['score']} / {r.get('par','?')} — {diff_str}\n"
-                        f"  Rating : {r['rating']}/10\n\n"
-                    )
-                hcp = calc_handicap(f_rounds)
-                if hcp is not None:
-                    sign = "+" if hcp > 0 else ""
-                    text_box.insert("end", f"─────────────────────────────\n")
-                    text_box.insert("end", f"  {fname}'s Handicap: {sign}{hcp:.1f}\n")
-            text_box.config(state="disabled")
-
-        tk.Button(self.frame, text="Load Rounds", command=load_friend_rounds,
-                  font=("Georgia", 11), width=14,
-                  bg="#f0e68c", fg="#1a5c2a", relief="raised", cursor="hand2").pack(pady=2)
-
-        self.button(self.frame, "Back", self._back_from_activity)
-
-    def _back_from_activity(self):
-        self.geometry("500x480")
-        self.show_menu()
 
     # ── RECORD ROUND ─────────────────────────────────────────────────────────
     def show_record_round(self, edit_index=None):
-        self.geometry("500x480")
+        self.geometry("500x500")
         self.clear()
         is_edit = edit_index is not None
         self.label(self.frame, "Edit Round" if is_edit else "Record a Round", size=18, bold=True, pady=10)
@@ -412,8 +405,7 @@ class ShankIslandApp(tk.Tk):
         rating_entry.insert(0, prefill.get("rating", ""))
 
         self.label(self.frame, "Your Score  /  Course Par:", size=11)
-        sp_frame = tk.Frame(self.frame, bg="#1a5c2a")
-        sp_frame.pack(pady=4)
+        sp_frame = tk.Frame(self.frame, bg="#1a5c2a"); sp_frame.pack(pady=4)
         score_entry = tk.Entry(sp_frame, font=("Georgia", 12), width=6)
         score_entry.pack(side="left", padx=4)
         score_entry.insert(0, prefill.get("score", ""))
@@ -429,13 +421,11 @@ class ShankIslandApp(tk.Tk):
             par    = par_entry.get().strip()
             rating = rating_entry.get().strip()
             if not course or not score or not par or not rating:
-                messagebox.showwarning("Missing info", "Please fill in all fields.")
-                return
+                messagebox.showwarning("Missing info", "Please fill in all fields."); return
             try:
                 int(score); int(par); float(rating)
             except ValueError:
-                messagebox.showwarning("Invalid input", "Score and par must be whole numbers; rating must be a number.")
-                return
+                messagebox.showwarning("Invalid input", "Score and par must be whole numbers."); return
             if self.current_user not in self.rounds:
                 self.rounds[self.current_user] = []
             entry = {"course": course, "score": score, "par": par, "rating": rating}
@@ -448,56 +438,69 @@ class ShankIslandApp(tk.Tk):
 
         self.button(self.frame, "Save", save_round)
 
-    # ── PREVIOUS ROUNDS ──────────────────────────────────────────────────────
+    # ── PREVIOUS ROUNDS ───────────────────────────────────────────────────────
     def show_previous_rounds(self):
-        self.geometry("500x560")
+        self.geometry("500x580")
         self.clear()
         self.label(self.frame, "Previous Rounds", size=18, bold=True, pady=6)
 
         user_rounds = self.rounds.get(self.current_user, [])
-
         if not user_rounds:
             self.label(self.frame, "No reported entries available.", size=13, color="#f0e68c")
             self.button(self.frame, "Back", self._back_from_rounds)
             return
 
-        list_frame = tk.Frame(self.frame, bg="#1a5c2a")
-        list_frame.pack(pady=4)
-        sb = tk.Scrollbar(list_frame, orient="vertical")
-        listbox = tk.Listbox(list_frame, font=("Courier", 11), width=48, height=6,
-                             bg="#0f3d1a", fg="white",
-                             selectbackground="#f0e68c", selectforeground="#1a5c2a",
-                             relief="flat", yscrollcommand=sb.set)
-        sb.config(command=listbox.yview)
-        sb.pack(side="right", fill="y")
-        listbox.pack(side="left")
+        best_idx, worst_idx = get_best_worst(user_rounds)
 
-        for i, r in enumerate(user_rounds, 1):
+        # Legend
+        leg = tk.Frame(self.frame, bg="#1a5c2a"); leg.pack()
+        tk.Label(leg, text="🟡 Best", font=("Georgia", 9), bg="#1a5c2a", fg="#f0e68c").pack(side="left", padx=6)
+        tk.Label(leg, text="🔴 Worst", font=("Georgia", 9), bg="#1a5c2a", fg="#ff6b6b").pack(side="left", padx=6)
+
+        lf = tk.Frame(self.frame, bg="#1a5c2a"); lf.pack(pady=4)
+        sb = tk.Scrollbar(lf, orient="vertical")
+        listbox = tk.Listbox(lf, font=("Courier", 11), width=48, height=6,
+                             bg="#0f3d1a", fg="white",
+                             selectbackground="#2e8b57", selectforeground="white",
+                             relief="flat", yscrollcommand=sb.set)
+        sb.config(command=listbox.yview); sb.pack(side="right", fill="y"); listbox.pack(side="left")
+
+        for i, r in enumerate(user_rounds):
             try:
                 diff = int(r["score"]) - int(r["par"])
                 diff_str = format_diff(diff)
             except (KeyError, ValueError):
                 diff_str = "N/A"
-            listbox.insert("end", f"  Round {i}: {r['course']}  |  {r['score']}/{r.get('par','?')} — {diff_str}")
+            prefix = "🏆" if i == best_idx else ("💀" if i == worst_idx else "  ")
+            comment_count = len(self.get_round_comments(self.current_user, i))
+            cc = f" 💬{comment_count}" if comment_count else ""
+            listbox.insert("end", f"{prefix} Round {i+1}: {r['course']}  {r['score']}/{r.get('par','?')} — {diff_str}{cc}")
+            if i == best_idx:
+                listbox.itemconfig(i, fg="#f0e68c")
+            elif i == worst_idx:
+                listbox.itemconfig(i, fg="#ff6b6b")
 
-        detail_box = tk.Text(self.frame, font=("Courier", 10), width=50, height=4,
-                             bg="#0f3d1a", fg="white", relief="flat", padx=8, pady=6)
-        detail_box.pack(pady=4)
+        # Detail box
+        detail_box = tk.Text(self.frame, font=("Courier", 10), width=50, height=3,
+                             bg="#0f3d1a", fg="white", relief="flat", padx=8, pady=4)
+        detail_box.pack(pady=2)
 
         def on_select(event=None):
             sel = listbox.curselection()
-            if not sel:
-                return
+            if not sel: return
             r = user_rounds[sel[0]]
             try:
                 diff = int(r["score"]) - int(r["par"])
                 diff_str = format_diff(diff)
             except (KeyError, ValueError):
                 diff_str = "N/A"
+            tag = ""
+            if sel[0] == best_idx:   tag = "  ⭐ BEST ROUND"
+            elif sel[0] == worst_idx: tag = "  💀 WORST ROUND"
             detail_box.config(state="normal")
             detail_box.delete("1.0", "end")
             detail_box.insert("end",
-                f"  Course : {r['course']}\n"
+                f"  Course : {r['course']}{tag}\n"
                 f"  Score  : {r['score']} / {r.get('par','?')} — {diff_str}\n"
                 f"  Rating : {r['rating']}/10\n"
             )
@@ -508,45 +511,130 @@ class ShankIslandApp(tk.Tk):
         handicap = calc_handicap(user_rounds)
         if handicap is not None:
             sign = "+" if handicap > 0 else ""
-            self.label(self.frame, f"Handicap (avg vs par): {sign}{handicap:.1f}",
-                       size=11, color="#f0e68c", pady=2)
+            self.label(self.frame, f"Handicap: {sign}{handicap:.1f}", size=11, color="#f0e68c", pady=1)
 
-        btn_frame = tk.Frame(self.frame, bg="#1a5c2a")
-        btn_frame.pack(pady=4)
+        btn_frame = tk.Frame(self.frame, bg="#1a5c2a"); btn_frame.pack(pady=4)
+
+        def on_view():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showwarning("No selection", "Please select a round to view."); return
+            self.show_round_detail(self.current_user, sel[0], is_owner=True)
 
         def on_edit():
             sel = listbox.curselection()
             if not sel:
-                messagebox.showwarning("No selection", "Please select a round to edit.")
-                return
+                messagebox.showwarning("No selection", "Please select a round to edit."); return
             self.show_record_round(edit_index=sel[0])
 
         def on_delete():
             sel = listbox.curselection()
             if not sel:
-                messagebox.showwarning("No selection", "Please select a round to delete.")
-                return
+                messagebox.showwarning("No selection", "Please select a round to delete."); return
             self.show_confirm_delete(sel[0])
 
+        tk.Button(btn_frame, text="View / Comments", command=on_view,
+                  font=("Georgia", 11), width=15,
+                  bg="#2e8b57", fg="white", relief="raised", cursor="hand2").pack(side="left", padx=4)
         tk.Button(btn_frame, text="Edit", command=on_edit,
-                  font=("Georgia", 12), width=10,
-                  bg="#f0e68c", fg="#1a5c2a", relief="raised", cursor="hand2").pack(side="left", padx=8)
+                  font=("Georgia", 11), width=8,
+                  bg="#f0e68c", fg="#1a5c2a", relief="raised", cursor="hand2").pack(side="left", padx=4)
         tk.Button(btn_frame, text="Delete", command=on_delete,
-                  font=("Georgia", 12), width=10,
-                  bg="#c0392b", fg="white", relief="raised", cursor="hand2").pack(side="left", padx=8)
+                  font=("Georgia", 11), width=8,
+                  bg="#c0392b", fg="white", relief="raised", cursor="hand2").pack(side="left", padx=4)
 
         self.button(self.frame, "Back", self._back_from_rounds)
 
     def _back_from_rounds(self):
-        self.geometry("500x480")
+        self.geometry("500x500")
         self.show_menu()
 
-    # ── CONFIRM DELETE ROUND ─────────────────────────────────────────────────
-    def show_confirm_delete(self, index):
-        self.geometry("500x480")
+    # ── ROUND DETAIL + COMMENTS ───────────────────────────────────────────────
+    def show_round_detail(self, owner, round_idx, is_owner=False):
+        self.geometry("500x580")
         self.clear()
-        user_rounds = self.rounds.get(self.current_user, [])
-        r = user_rounds[index]
+
+        rounds = self.rounds.get(owner, [])
+        if round_idx >= len(rounds):
+            self.show_menu(); return
+        r = rounds[round_idx]
+
+        try:
+            diff = int(r["score"]) - int(r["par"])
+            diff_str = format_diff(diff)
+        except (KeyError, ValueError):
+            diff_str = "N/A"
+
+        best_idx, worst_idx = get_best_worst(rounds)
+        tag = ""
+        if round_idx == best_idx:   tag = "  ⭐ BEST ROUND"
+        elif round_idx == worst_idx: tag = "  💀 WORST ROUND"
+
+        title = f"Round {round_idx+1} — {r['course']}"
+        self.label(self.frame, title, size=14, bold=True, pady=8)
+
+        info = tk.Text(self.frame, font=("Courier", 11), width=50, height=4,
+                       bg="#0f3d1a", fg="white", relief="flat", padx=8, pady=6)
+        info.pack()
+        info.insert("end",
+            f"  Score  : {r['score']} / {r.get('par','?')} — {diff_str}{tag}\n"
+            f"  Rating : {r['rating']}/10\n"
+            f"  Player : {owner}\n"
+        )
+        info.config(state="disabled")
+
+        self.label(self.frame, "💬 Comments", size=13, bold=True, pady=4)
+
+        comments = self.get_round_comments(owner, round_idx)
+        cbox = tk.Text(self.frame, font=("Courier", 10), width=50, height=5,
+                       bg="#0f3d1a", fg="white", relief="flat", padx=8, pady=4)
+        cbox.pack()
+        if not comments:
+            cbox.insert("end", "  No comments yet. Be the first!\n")
+        else:
+            for c in comments:
+                cbox.insert("end", f"  {c['author']}: {c['text']}\n")
+        cbox.config(state="disabled")
+
+        # Comment input (friends and owner can comment)
+        can_comment = (self.current_user == owner or
+                       owner in self.get_friends(self.current_user))
+        if can_comment:
+            comment_entry = tk.Entry(self.frame, font=("Georgia", 11), width=38)
+            comment_entry.pack(pady=4)
+            comment_entry.insert(0, "Write a comment...")
+            comment_entry.bind("<FocusIn>", lambda e: comment_entry.delete(0, "end")
+                               if comment_entry.get() == "Write a comment..." else None)
+
+            def post_comment():
+                text = comment_entry.get().strip()
+                if not text or text == "Write a comment...":
+                    messagebox.showwarning("Empty", "Please write a comment first."); return
+                self.add_comment(owner, round_idx, self.current_user, text)
+                if self.current_user != owner:
+                    self.add_notif(owner, "comment", self.current_user,
+                                   f"{self.current_user} commented on your Round {round_idx+1} ({r['course']}): \"{text[:40]}\"")
+                comment_entry.delete(0, "end")
+                self.show_round_detail(owner, round_idx, is_owner=is_owner)
+
+            tk.Button(self.frame, text="Post Comment", command=post_comment,
+                      font=("Georgia", 11), width=14, bg="#2e8b57", fg="white",
+                      relief="raised", cursor="hand2").pack(pady=2)
+
+        def go_back():
+            self.geometry("500x580")
+            if is_owner:
+                self.show_previous_rounds()
+            else:
+                self.show_friends_activity()
+
+        self.button(self.frame, "Back", go_back)
+
+    # ── CONFIRM DELETE ────────────────────────────────────────────────────────
+    def show_confirm_delete(self, index):
+        self.geometry("500x500")
+        self.clear()
+        r = self.rounds.get(self.current_user, [])[index]
         self.label(self.frame, "Are you sure?", size=18, bold=True, pady=30)
         self.label(self.frame, "This will permanently delete:", size=12)
         self.label(self.frame, f'"{r["course"]}"  —  Score: {r["score"]} / {r.get("par","?")}',
@@ -555,21 +643,111 @@ class ShankIslandApp(tk.Tk):
 
         def confirm_yes():
             self.rounds[self.current_user].pop(index)
+            # shift comments keys above index
+            old = self.comments.get(self.current_user, {})
+            new = {}
+            for k, v in old.items():
+                ki = int(k)
+                if ki < index:   new[str(ki)] = v
+                elif ki > index: new[str(ki-1)] = v
+            self.comments[self.current_user] = new
             save_json(ROUNDS_FILE, self.rounds)
+            save_json(COMMENTS_FILE, self.comments)
             self.show_previous_rounds()
 
-        btn_frame = tk.Frame(self.frame, bg="#1a5c2a")
-        btn_frame.pack(pady=16)
-        tk.Button(btn_frame, text="Yes, Delete", command=confirm_yes,
+        bf = tk.Frame(self.frame, bg="#1a5c2a"); bf.pack(pady=16)
+        tk.Button(bf, text="Yes, Delete", command=confirm_yes,
                   font=("Georgia", 12), width=12,
                   bg="#c0392b", fg="white", relief="raised", cursor="hand2").pack(side="left", padx=10)
-        tk.Button(btn_frame, text="No, Go Back", command=self.show_previous_rounds,
+        tk.Button(bf, text="No, Go Back", command=self.show_previous_rounds,
                   font=("Georgia", 12), width=12,
                   bg="#f0e68c", fg="#1a5c2a", relief="raised", cursor="hand2").pack(side="left", padx=10)
 
-    # ── THANK YOU ────────────────────────────────────────────────────────────
+    # ── FRIENDS ACTIVITY ──────────────────────────────────────────────────────
+    def show_friends_activity(self):
+        self.geometry("500x560")
+        self.clear()
+        self.label(self.frame, "Friends Activity", size=18, bold=True, pady=8)
+
+        friends = self.get_friends(self.current_user)
+        if not friends:
+            self.label(self.frame, "You have no friends yet.", size=12, color="#f0e68c")
+            self.button(self.frame, "Back", self._back_from_activity); return
+
+        self.label(self.frame, "Select a friend:", size=11, pady=2)
+        sel_frame = tk.Frame(self.frame, bg="#1a5c2a"); sel_frame.pack()
+        friend_var = tk.StringVar(value=friends[0])
+        for f in friends:
+            tk.Radiobutton(sel_frame, text=f, variable=friend_var, value=f,
+                           font=("Georgia", 11), bg="#1a5c2a", fg="white",
+                           selectcolor="#0f3d1a", activebackground="#1a5c2a",
+                           cursor="hand2").pack(side="left", padx=6)
+
+        lf = tk.Frame(self.frame, bg="#1a5c2a"); lf.pack(pady=4)
+        sb = tk.Scrollbar(lf, orient="vertical")
+        friend_lb = tk.Listbox(lf, font=("Courier", 10), width=50, height=7,
+                               bg="#0f3d1a", fg="white",
+                               selectbackground="#2e8b57", selectforeground="white",
+                               relief="flat", yscrollcommand=sb.set)
+        sb.config(command=friend_lb.yview); sb.pack(side="right", fill="y"); friend_lb.pack(side="left")
+
+        loaded_rounds = []
+
+        def load_friend_rounds():
+            nonlocal loaded_rounds
+            fname = friend_var.get()
+            f_rounds = self.rounds.get(fname, [])
+            loaded_rounds = f_rounds
+            friend_lb.delete(0, "end")
+            best_i, worst_i = get_best_worst(f_rounds)
+            if not f_rounds:
+                friend_lb.insert("end", f"  {fname} has no recorded rounds yet.")
+            else:
+                for i, r in enumerate(f_rounds):
+                    try:
+                        diff = int(r["score"]) - int(r["par"])
+                        diff_str = format_diff(diff)
+                    except (KeyError, ValueError):
+                        diff_str = "N/A"
+                    prefix = "🏆" if i == best_i else ("💀" if i == worst_i else "  ")
+                    cc = len(self.get_round_comments(fname, i))
+                    cc_str = f" 💬{cc}" if cc else ""
+                    friend_lb.insert("end", f"{prefix} Round {i+1}: {r['course']}  {r['score']}/{r.get('par','?')} — {diff_str}{cc_str}")
+                    if i == best_i:   friend_lb.itemconfig(i, fg="#f0e68c")
+                    elif i == worst_i: friend_lb.itemconfig(i, fg="#ff6b6b")
+
+                hcp = calc_handicap(f_rounds)
+                if hcp is not None:
+                    sign = "+" if hcp > 0 else ""
+                    friend_lb.insert("end", f"  ─── {fname}'s Handicap: {sign}{hcp:.1f} ───")
+
+        tk.Button(self.frame, text="Load Rounds", command=load_friend_rounds,
+                  font=("Georgia", 11), width=14,
+                  bg="#f0e68c", fg="#1a5c2a", relief="raised", cursor="hand2").pack(pady=2)
+
+        def on_view_friend_round(event=None):
+            sel = friend_lb.curselection()
+            if not sel: return
+            idx = sel[0]
+            fname = friend_var.get()
+            f_rounds = self.rounds.get(fname, [])
+            if idx >= len(f_rounds): return  # handicap summary row
+            self.show_round_detail(fname, idx, is_owner=False)
+
+        friend_lb.bind("<Double-Button-1>", on_view_friend_round)
+        tk.Button(self.frame, text="View Round & Comment", command=on_view_friend_round,
+                  font=("Georgia", 11), width=20,
+                  bg="#2e8b57", fg="white", relief="raised", cursor="hand2").pack(pady=2)
+
+        self.button(self.frame, "Back", self._back_from_activity)
+
+    def _back_from_activity(self):
+        self.geometry("500x500")
+        self.show_menu()
+
+    # ── THANK YOU ─────────────────────────────────────────────────────────────
     def show_thank_you(self):
-        self.geometry("500x480")
+        self.geometry("500x500")
         self.clear()
         self.label(self.frame, "Thank you for visiting", size=16, pady=40)
         self.label(self.frame, "SHANK ISLAND.", size=24, bold=True, color="#f0e68c")
