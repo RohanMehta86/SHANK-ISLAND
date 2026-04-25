@@ -1,0 +1,346 @@
+#Golf website rough draft using gui system
+
+
+import tkinter as tk
+from tkinter import messagebox
+import json
+import os
+
+# ── Data files ──────────────────────────────────────────────────────────────
+USERS_FILE = "users.json"
+ROUNDS_FILE = "rounds.json"
+
+def load_json(path):
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+def format_diff(diff):
+    """Return a string like +3, -2, or E (even)."""
+    if diff == 0:
+        return "E (Even)"
+    elif diff > 0:
+        return f"+{diff} (over par)"
+    else:
+        return f"{diff} (under par)"
+
+def calc_handicap(rounds):
+    """Average the score-minus-par across all rounds."""
+    diffs = []
+    for r in rounds:
+        try:
+            diffs.append(int(r["score"]) - int(r["par"]))
+        except (KeyError, ValueError):
+            pass
+    if not diffs:
+        return None
+    return sum(diffs) / len(diffs)
+
+# ── App ──────────────────────────────────────────────────────────────────────
+class ShankIslandApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Shank Island")
+        self.geometry("500x440")
+        self.resizable(False, False)
+        self.configure(bg="#1a5c2a")
+
+        self.current_user = None
+        self.users = load_json(USERS_FILE)
+        self.rounds = load_json(ROUNDS_FILE)
+
+        self.frame = None
+        self.show_home()
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    def clear(self):
+        if self.frame:
+            self.frame.destroy()
+        self.frame = tk.Frame(self, bg="#1a5c2a")
+        self.frame.pack(expand=True, fill="both")
+
+    def label(self, parent, text, size=14, bold=False, color="white", pady=5):
+        weight = "bold" if bold else "normal"
+        tk.Label(parent, text=text, font=("Georgia", size, weight),
+                 bg="#1a5c2a", fg=color).pack(pady=pady)
+
+    def button(self, parent, text, command, width=20):
+        tk.Button(parent, text=text, command=command,
+                  font=("Georgia", 12), width=width,
+                  bg="#f0e68c", fg="#1a5c2a", relief="raised",
+                  cursor="hand2").pack(pady=6)
+
+    def entry(self, parent, show=None, width=30):
+        e = tk.Entry(parent, font=("Georgia", 12), width=width, show=show)
+        e.pack(pady=4)
+        return e
+
+    # ── pages ─────────────────────────────────────────────────────────────────
+
+    # HOME
+    def show_home(self):
+        self.clear()
+        self.current_user = None
+        self.label(self.frame, "⛳  SHANK ISLAND  ⛳", size=26, bold=True, pady=60)
+        self.button(self.frame, "ENTER", self.show_login)
+
+    # LOGIN
+    def show_login(self):
+        self.clear()
+        self.label(self.frame, "Login", size=20, bold=True, pady=20)
+
+        self.label(self.frame, "Username:", size=11)
+        username_entry = self.entry(self.frame)
+
+        self.label(self.frame, "Password:", size=11)
+        password_entry = self.entry(self.frame, show="*")
+
+        def attempt_login():
+            u = username_entry.get().strip()
+            p = password_entry.get().strip()
+            if not u or not p:
+                messagebox.showwarning("Missing info", "Please enter a username and password.")
+                return
+            if u in self.users:
+                if self.users[u] == p:
+                    self.current_user = u
+                    self.show_menu()
+                else:
+                    messagebox.showerror("Wrong password", "Incorrect password. Please try again.")
+            else:
+                self.show_new_user_prompt(u, p)
+
+        self.button(self.frame, "Login", attempt_login)
+
+    # NEW USER PROMPT
+    def show_new_user_prompt(self, username, password):
+        self.clear()
+        self.label(self.frame, "Username not found.", size=13, pady=30)
+        self.label(self.frame, "Are you creating a new account?", size=12)
+
+        def yes():
+            self.users[username] = password
+            save_json(USERS_FILE, self.users)
+            self.current_user = username
+            self.show_menu()
+
+        def no():
+            self.show_login()
+
+        self.button(self.frame, "Yes", yes)
+        self.button(self.frame, "No", no)
+
+    # MAIN MENU
+    def show_menu(self):
+        self.clear()
+        self.label(self.frame, f"Welcome, {self.current_user}!", size=16, bold=True, pady=20)
+        self.button(self.frame, "Record Round", self.show_record_round)
+        self.button(self.frame, "Load Previous Rounds", self.show_previous_rounds)
+        self.button(self.frame, "Go Back (Logout)", self.show_login)
+
+    # RECORD ROUND  (edit_index=None → new round, int → editing existing)
+    def show_record_round(self, edit_index=None):
+        self.clear()
+        is_edit = edit_index is not None
+        self.label(self.frame, "Edit Round" if is_edit else "Record a Round", size=18, bold=True, pady=10)
+
+        user_rounds = self.rounds.get(self.current_user, [])
+        prefill = user_rounds[edit_index] if is_edit else {}
+
+        self.label(self.frame, "Golf Course Name:", size=11)
+        course_entry = self.entry(self.frame)
+        course_entry.insert(0, prefill.get("course", ""))
+
+        self.label(self.frame, "Rate the course out of ten.", size=11)
+        rating_entry = self.entry(self.frame, width=10)
+        rating_entry.insert(0, prefill.get("rating", ""))
+
+        # Score / Par row
+        self.label(self.frame, "Your Score  /  Course Par:", size=11)
+        score_par_frame = tk.Frame(self.frame, bg="#1a5c2a")
+        score_par_frame.pack(pady=4)
+        score_entry = tk.Entry(score_par_frame, font=("Georgia", 12), width=6)
+        score_entry.pack(side="left", padx=4)
+        score_entry.insert(0, prefill.get("score", ""))
+        tk.Label(score_par_frame, text="/", font=("Georgia", 16, "bold"),
+                 bg="#1a5c2a", fg="white").pack(side="left")
+        par_entry = tk.Entry(score_par_frame, font=("Georgia", 12), width=6)
+        par_entry.pack(side="left", padx=4)
+        par_entry.insert(0, prefill.get("par", ""))
+
+        def save_round():
+            course = course_entry.get().strip()
+            score  = score_entry.get().strip()
+            par    = par_entry.get().strip()
+            rating = rating_entry.get().strip()
+
+            if not course or not score or not par or not rating:
+                messagebox.showwarning("Missing info", "Please fill in all fields.")
+                return
+            try:
+                int(score)
+                int(par)
+                float(rating)
+            except ValueError:
+                messagebox.showwarning("Invalid input", "Score and par must be whole numbers; rating must be a number.")
+                return
+
+            if self.current_user not in self.rounds:
+                self.rounds[self.current_user] = []
+
+            entry = {"course": course, "score": score, "par": par, "rating": rating}
+            if is_edit:
+                self.rounds[self.current_user][edit_index] = entry
+            else:
+                self.rounds[self.current_user].append(entry)
+
+            save_json(ROUNDS_FILE, self.rounds)
+            self.show_thank_you()
+
+        self.button(self.frame, "Save", save_round)
+
+    # PREVIOUS ROUNDS
+    def show_previous_rounds(self):
+        self.clear()
+        self.geometry("500x520")
+        self.label(self.frame, "Previous Rounds", size=18, bold=True, pady=6)
+
+        user_rounds = self.rounds.get(self.current_user, [])
+
+        if not user_rounds:
+            self.label(self.frame, "No reported entries available.", size=13, color="#f0e68c")
+            self.button(self.frame, "Back", self._back_from_rounds)
+            return
+
+        # ── Listbox to select a round ────────────────────────────────────────
+        list_frame = tk.Frame(self.frame, bg="#1a5c2a")
+        list_frame.pack(pady=4)
+
+        scrollbar = tk.Scrollbar(list_frame, orient="vertical")
+        listbox = tk.Listbox(list_frame, font=("Courier", 11), width=48, height=6,
+                             bg="#0f3d1a", fg="white", selectbackground="#f0e68c",
+                             selectforeground="#1a5c2a", relief="flat",
+                             yscrollcommand=scrollbar.set)
+        scrollbar.config(command=listbox.yview)
+        scrollbar.pack(side="right", fill="y")
+        listbox.pack(side="left")
+
+        for i, r in enumerate(user_rounds, 1):
+            try:
+                diff = int(r["score"]) - int(r["par"])
+                diff_str = format_diff(diff)
+            except (KeyError, ValueError):
+                diff_str = "N/A"
+            listbox.insert("end", f"  Round {i}: {r['course']}  |  {r['score']}/{r.get('par','?')} — {diff_str}")
+
+        # ── Detail / handicap text box ───────────────────────────────────────
+        detail_box = tk.Text(self.frame, font=("Courier", 10), width=50, height=4,
+                             bg="#0f3d1a", fg="white", relief="flat", padx=8, pady=6)
+        detail_box.pack(pady=4)
+
+        def on_select(event=None):
+            sel = listbox.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            r = user_rounds[idx]
+            try:
+                diff = int(r["score"]) - int(r["par"])
+                diff_str = format_diff(diff)
+            except (KeyError, ValueError):
+                diff_str = "N/A"
+            detail_box.config(state="normal")
+            detail_box.delete("1.0", "end")
+            detail_box.insert("end",
+                f"  Course : {r['course']}\n"
+                f"  Score  : {r['score']} / {r.get('par','?')} — {diff_str}\n"
+                f"  Rating : {r['rating']}/10\n"
+            )
+            detail_box.config(state="disabled")
+
+        listbox.bind("<<ListboxSelect>>", on_select)
+
+        # ── Handicap line ────────────────────────────────────────────────────
+        handicap = calc_handicap(user_rounds)
+        if handicap is not None:
+            sign = "+" if handicap > 0 else ""
+            self.label(self.frame, f"Handicap (avg vs par): {sign}{handicap:.1f}",
+                       size=11, color="#f0e68c", pady=2)
+
+        # ── Edit / Delete buttons ────────────────────────────────────────────
+        btn_frame = tk.Frame(self.frame, bg="#1a5c2a")
+        btn_frame.pack(pady=4)
+
+        def on_edit():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showwarning("No selection", "Please select a round to edit.")
+                return
+            self.geometry("500x440")
+            self.show_record_round(edit_index=sel[0])
+
+        def on_delete():
+            sel = listbox.curselection()
+            if not sel:
+                messagebox.showwarning("No selection", "Please select a round to delete.")
+                return
+            self.show_confirm_delete(sel[0])
+
+        tk.Button(btn_frame, text="Edit", command=on_edit,
+                  font=("Georgia", 12), width=10,
+                  bg="#f0e68c", fg="#1a5c2a", relief="raised", cursor="hand2").pack(side="left", padx=8)
+        tk.Button(btn_frame, text="Delete", command=on_delete,
+                  font=("Georgia", 12), width=10,
+                  bg="#c0392b", fg="white", relief="raised", cursor="hand2").pack(side="left", padx=8)
+
+        self.button(self.frame, "Back", self._back_from_rounds)
+
+    def _back_from_rounds(self):
+        self.geometry("500x440")
+        self.show_menu()
+
+    # CONFIRM DELETE
+    def show_confirm_delete(self, index):
+        self.clear()
+        user_rounds = self.rounds.get(self.current_user, [])
+        r = user_rounds[index]
+        self.label(self.frame, "Are you sure?", size=18, bold=True, pady=30)
+        self.label(self.frame, f"This will permanently delete:", size=12)
+        self.label(self.frame, f'"{r["course"]}"  —  Score: {r["score"]} / {r.get("par","?")}',
+                   size=12, color="#f0e68c")
+        self.label(self.frame, "This cannot be undone.", size=11, color="#ff9999", pady=2)
+
+        def confirm_yes():
+            self.rounds[self.current_user].pop(index)
+            save_json(ROUNDS_FILE, self.rounds)
+            self.show_previous_rounds()
+
+        def confirm_no():
+            self.show_previous_rounds()
+
+        btn_frame = tk.Frame(self.frame, bg="#1a5c2a")
+        btn_frame.pack(pady=16)
+        tk.Button(btn_frame, text="Yes, Delete", command=confirm_yes,
+                  font=("Georgia", 12), width=12,
+                  bg="#c0392b", fg="white", relief="raised", cursor="hand2").pack(side="left", padx=10)
+        tk.Button(btn_frame, text="No, Go Back", command=confirm_no,
+                  font=("Georgia", 12), width=12,
+                  bg="#f0e68c", fg="#1a5c2a", relief="raised", cursor="hand2").pack(side="left", padx=10)
+
+    # THANK YOU
+    def show_thank_you(self):
+        self.clear()
+        self.label(self.frame, "Thank you for visiting", size=16, pady=40)
+        self.label(self.frame, "SHANK ISLAND.", size=24, bold=True, color="#f0e68c")
+        self.button(self.frame, "Home", self.show_menu)
+
+
+# ── Run ───────────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    app = ShankIslandApp()
+    app.mainloop()
